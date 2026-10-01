@@ -177,14 +177,36 @@
     }
 
     // Glossary tokens
+    const q = (sel.quote || "").trim();
     const glossary = (S.paper && S.paper.glossary) || [];
     for (const item of glossary) {
-      if (item.zh && item.en && (sel.quote.includes(item.zh) || item.zh.includes(sel.quote.trim()))) {
-        const g = item.en.match(/[A-Za-z0-9]+/g);
-        if (g && g.length) {
-          const n = g.map(norm).filter(Boolean);
-          if (n.length) tokenLists.push(n);
+      if (!item.zh || !item.en) continue;
+      const zhClean = item.zh.replace(/（[^）]*）|\([^)]*\)/g, "").trim();
+      if (q.includes(zhClean) || (zhClean.length <= q.length + 2 && zhClean.includes(q))) {
+        const enStripped = item.en.replace(/（[^）]*）|\([^)]*\)/g, " ").trim();
+        const g1 = enStripped.match(/[A-Za-z0-9]+/g);
+        if (g1 && g1.length) {
+          const n1 = g1.map(norm).filter(Boolean);
+          if (n1.length) tokenLists.push(n1);
         }
+        const g2 = item.en.match(/[A-Za-z0-9]+/g);
+        if (g2 && g2.length) {
+          const n2 = g2.map(norm).filter(Boolean);
+          if (n2.length && n2.join(" ") !== (g1 ? g1.map(norm).join(" ") : "")) {
+            tokenLists.push(n2);
+          }
+        }
+      }
+    }
+
+    // Inline parenthesized translation check (e.g. "异构性（heterogeneity）")
+    const afterText = zh.slice(e, e + 120);
+    const parenMatch = afterText.match(/^[（(]([^）)]+)[）)]/);
+    if (parenMatch) {
+      const pTokens = parenMatch[1].replace(/（[^）]*）|\([^)]*\)/g, " ").match(/[A-Za-z0-9]+/g);
+      if (pTokens && pTokens.length) {
+        const nP = pTokens.map(norm).filter((t) => t && t.length > 1);
+        if (nP.length) tokenLists.push(nP);
       }
     }
 
@@ -193,16 +215,18 @@
       candidates.push(...matchTokensInWords(words, tokens));
     }
 
-    if (candidates.length > 0) {
-      let best = null, bestScore = Infinity;
-      for (const c of candidates) {
+    // Strict disambiguation: only accept candidates within the target sentence window!
+    const insideCandidates = candidates.filter(
+      (c) => c.start >= wSentStart - 3 && c.end <= wSentEnd + 3
+    );
+
+    if (insideCandidates.length > 0) {
+      let best = null, bestDist = Infinity;
+      for (const c of insideCandidates) {
         const mid = (c.start + c.end) / 2;
-        const isInside = (c.start >= wSentStart && c.end <= wSentEnd);
-        // Heavy penalty if candidate belongs to a different sentence:
-        const sentPenalty = isInside ? 0 : 500 + Math.abs(mid - targetWordMid) * 10;
-        const score = sentPenalty + Math.abs(mid - targetWordMid);
-        if (score < bestScore) {
-          bestScore = score;
+        const dist = Math.abs(mid - targetWordMid);
+        if (dist < bestDist) {
+          bestDist = dist;
           best = c;
         }
       }
@@ -210,9 +234,9 @@
     }
 
     // Fallback: sentence proportional
-    const zSent = zhSents[kStart];
-    const sentFrac0 = Math.max(0, Math.min(1, (s - zSent.start) / Math.max(1, zSent.text.length)));
-    const sentFrac1 = Math.max(sentFrac0, Math.min(1, (e - zSent.start) / Math.max(1, zSent.text.length)));
+    const totalZhSpan = Math.max(1, zhSents[kEnd].end - zhSents[kStart].start);
+    const sentFrac0 = Math.max(0, Math.min(1, (s - zhSents[kStart].start) / totalZhSpan));
+    const sentFrac1 = Math.max(sentFrac0, Math.min(1, (e - zhSents[kStart].start) / totalZhSpan));
     const sentWordCount = wSentEnd - wSentStart + 1;
     const start = wSentStart + Math.floor(sentFrac0 * sentWordCount);
     const end = Math.min(wSentEnd, Math.max(start, wSentStart + Math.ceil(sentFrac1 * sentWordCount) - 1));
@@ -316,6 +340,7 @@
     const list = pages();
     if (!list.length) return;
     pvPage = Math.min(list.length, Math.max(1, page));
+    if (blockId) pvBlock = blockId;
     const img = PR.$(".pv-page img");
     img.decoding = "async";
     const src = srcOf(pvPage);
